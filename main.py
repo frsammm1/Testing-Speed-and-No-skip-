@@ -7,7 +7,7 @@ import re
 import mimetypes
 from telethon import TelegramClient, events, utils, errors
 from telethon.sessions import StringSession
-from telethon.network import connection # Ye import jaruri hai connection fix ke liye
+from telethon.network import connection
 from telethon.tl.types import (
     DocumentAttributeFilename, 
     DocumentAttributeVideo, 
@@ -27,15 +27,13 @@ PORT = int(os.environ.get("PORT", 8080))
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- CLIENT SETUP (RENDER COMPATIBLE FIX) ---
-# Changes: use_ipv6=False (Critical for Render), ConnectionTcpFull (Better stability)
-
+# --- CLIENT SETUP (RENDER OPTIMIZED - IPv4 Only) ---
 user_client = TelegramClient(
     StringSession(STRING_SESSION), 
     API_ID, 
     API_HASH,
-    connection=connection.ConnectionTcpFull, # Stability ke liye TCP Full mode
-    use_ipv6=False,                          # RENDER FIX: IPv6 disable kiya
+    connection=connection.ConnectionTcpFull,
+    use_ipv6=False, # FIX: Force IPv4 for Render
     connection_retries=None, 
     flood_sleep_threshold=60,
     request_retries=10,
@@ -46,8 +44,8 @@ bot_client = TelegramClient(
     'bot_session', 
     API_ID, 
     API_HASH,
-    connection=connection.ConnectionTcpFull, # Stability ke liye TCP Full mode
-    use_ipv6=False,                          # RENDER FIX: IPv6 disable kiya
+    connection=connection.ConnectionTcpFull,
+    use_ipv6=False, # FIX: Force IPv4 for Render
     connection_retries=None, 
     flood_sleep_threshold=60,
     request_retries=10,
@@ -61,9 +59,9 @@ is_running = False
 status_message = None
 last_update_time = 0
 
-# --- WEB SERVER (Keep Alive) ---
+# --- WEB SERVER ---
 async def handle(request):
-    return web.Response(text="🔥 Ultra Bot Running (IPv4 Mode) - Status: Active")
+    return web.Response(text="🔥 Ultra Bot Running (MP4 Enforcer Mode) - Status: Active")
 
 async def start_web_server():
     app = web.Application()
@@ -107,7 +105,7 @@ async def progress_callback(current, total, start_time, file_name):
     
     try:
         await status_message.edit(
-            f"⚡️ **IPv4 Stable Mode...**\n"
+            f"⚡️ **Format Enforcer (MP4/JPG)**\n"
             f"📂 `{file_name}`\n"
             f"**{bar} {round(percentage, 1)}%**\n"
             f"🚀 `{human_readable_size(speed)}/s` | ⏳ `{time_formatter(eta)}`\n"
@@ -124,8 +122,8 @@ class UltraBufferedStream:
         self.name = file_name
         self.start_time = start_time
         self.current_bytes = 0
-        self.chunk_size = 8 * 1024 * 1024 
-        self.queue = asyncio.Queue(maxsize=5) # Reduced buffer slightly for Render RAM limits
+        self.chunk_size = 8 * 1024 * 1024 # 8MB Chunk
+        self.queue = asyncio.Queue(maxsize=5)
         self.downloader_task = asyncio.create_task(self._worker())
         self.buffer = b""
 
@@ -156,38 +154,68 @@ class UltraBufferedStream:
         self.buffer = self.buffer[size:]
         return data
 
-# --- FILE INFO HELPER ---
-def get_file_info(message):
-    file_name = "Unknown_File"
-    mime_type = "application/octet-stream"
+# --- SMART FORMAT ENFORCER ---
+def get_target_info(message):
+    """
+    Ye function decide karega ki file ka naya naam aur type kya hona chahiye.
+    Strictly enforces: Video -> MP4, Image -> JPG, Doc -> PDF
+    """
+    original_name = "Unknown_File"
+    target_mime = "application/octet-stream"
+    force_video = False
     
+    # 1. WebPage Handling (Ignore pure links)
     if isinstance(message.media, MessageMediaWebPage):
-        return None, None 
+        return None, None, False
 
+    # 2. Get Original Info
     if message.file:
-        mime_type = message.file.mime_type
+        original_mime = message.file.mime_type
         if message.file.name:
-            file_name = message.file.name
+            original_name = message.file.name
         else:
-            ext = mimetypes.guess_extension(mime_type) or ""
-            if not ext:
-                if "video" in mime_type: ext = ".mp4"
-                elif "image" in mime_type: ext = ".jpg"
-                elif "pdf" in mime_type: ext = ".pdf"
-            file_name = f"File_{message.id}{ext}"
-            
-    if "video" in mime_type and not re.search(r'\.(mp4|mkv|avi|mov|webm)$', file_name, re.IGNORECASE):
-        file_name += ".mp4"
-    elif "pdf" in mime_type and not file_name.lower().endswith(".pdf"):
-        file_name += ".pdf"
+            # Guess based on mime if name missing
+            ext = mimetypes.guess_extension(original_mime) or ""
+            original_name = f"File_{message.id}{ext}"
+    else:
+        # Photo objects usually don't have file attributes directly
+        original_mime = "image/jpeg"
+        original_name = f"Image_{message.id}.jpg"
+
+    # 3. ENFORCE FORMATS (The Magic Logic)
+    base_name = os.path.splitext(original_name)[0]
+    
+    # CASE A: VIDEO (MKV, AVI, WEBM -> MP4)
+    if "video" in original_mime or original_name.lower().endswith(('.mkv', '.avi', '.webm', '.mov', '.flv')):
+        final_name = base_name + ".mp4"
+        target_mime = "video/mp4"
+        force_video = True
         
-    return file_name, mime_type
+    # CASE B: IMAGE (PNG, WEBP -> JPG)
+    elif "image" in original_mime:
+        final_name = base_name + ".jpg"
+        target_mime = "image/jpeg"
+        force_video = False
+        
+    # CASE C: PDF (Maintain PDF)
+    elif "pdf" in original_mime or original_name.lower().endswith('.pdf'):
+        final_name = base_name + ".pdf"
+        target_mime = "application/pdf"
+        force_video = False
+        
+    # CASE D: OTHERS (Keep as is)
+    else:
+        final_name = original_name
+        target_mime = original_mime
+        force_video = False
+        
+    return final_name, target_mime, force_video
 
 # --- TRANSFER PROCESS ---
 async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
     global is_running, status_message
     
-    status_message = await event.respond(f"🔥 **Queue Engine (IPv4) Started!**\nSource: `{source_id}`")
+    status_message = await event.respond(f"🔥 **Format Enforcer Engine Started!**\nSource: `{source_id}`")
     total_processed = 0
     
     try:
@@ -198,64 +226,77 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
 
             if getattr(message, 'action', None): continue
 
+            # --- RETRY LOOP (No Skip) ---
             retries = 3
             success = False
             
             while retries > 0 and not success:
                 try:
+                    # 1. REFRESH MESSAGE (Fixes Expired Reference)
                     fresh_msg = await user_client.get_messages(source_id, ids=message.id)
                     if not fresh_msg: break 
 
-                    file_name, mime_type = get_file_info(fresh_msg)
+                    # 2. GET ENFORCED FORMAT INFO
+                    file_name, mime_type, is_video_mode = get_target_info(fresh_msg)
                     
-                    if not file_name and fresh_msg.text:
-                        await bot_client.send_message(dest_id, fresh_msg.text)
-                        success = True
+                    # Handle Text Only or Link Previews
+                    if not file_name:
+                        if fresh_msg.text:
+                            await bot_client.send_message(dest_id, fresh_msg.text)
+                            success = True
+                        else:
+                            success = True # Skip empty
                         continue
-                    elif not file_name: 
-                        break
 
-                    await status_message.edit(f"🔍 **Processing:** `{file_name}`\nAttempt: {4-retries}")
+                    await status_message.edit(f"🔍 **Converting:** `{file_name}`\nAttempt: {4-retries}")
 
                     start_time = time.time()
                     
-                    if not success:
-                        try:
-                            await bot_client.send_file(dest_id, fresh_msg.media, caption=fresh_msg.text or "")
-                            success = True
-                            await status_message.edit(f"✅ **Direct Copied:** `{file_name}`")
-                        except Exception:
-                            pass 
+                    # 3. PREPARE ATTRIBUTES (Crucial for MP4 streaming)
+                    attributes = []
+                    # Force the new filename in attributes
+                    attributes.append(DocumentAttributeFilename(file_name=file_name))
+                    
+                    # Preserve video duration/dims if available
+                    if hasattr(fresh_msg, 'document') and fresh_msg.document:
+                        for attr in fresh_msg.document.attributes:
+                            if isinstance(attr, DocumentAttributeVideo):
+                                attributes.append(DocumentAttributeVideo(
+                                    duration=attr.duration,
+                                    w=attr.w,
+                                    h=attr.h,
+                                    supports_streaming=True # FORCE STREAMING
+                                ))
 
-                    if not success:
-                        attributes = fresh_msg.document.attributes if hasattr(fresh_msg, 'document') else []
-                        thumb = await user_client.download_media(fresh_msg, thumb=-1)
-                        
-                        stream_file = UltraBufferedStream(
-                            user_client, 
-                            fresh_msg.media.document if hasattr(fresh_msg.media, 'document') else fresh_msg.media.photo,
-                            fresh_msg.file.size,
-                            file_name,
-                            start_time
-                        )
-                        
-                        force_doc = not ("video" in mime_type or "image" in mime_type)
-                        
-                        await bot_client.send_file(
-                            dest_id,
-                            file=stream_file,
-                            caption=fresh_msg.text or "",
-                            attributes=attributes,
-                            thumb=thumb,
-                            supports_streaming=True,
-                            file_size=fresh_msg.file.size,
-                            force_document=force_doc,
-                            part_size_kb=8192 
-                        )
-                        
-                        if thumb and os.path.exists(thumb): os.remove(thumb)
-                        success = True
-                        await status_message.edit(f"✅ **Streamed:** `{file_name}`")
+                    # 4. STREAM & UPLOAD
+                    thumb = await user_client.download_media(fresh_msg, thumb=-1)
+                    
+                    # Determine source media object
+                    media_obj = fresh_msg.media.document if hasattr(fresh_msg.media, 'document') else fresh_msg.media.photo
+                    
+                    stream_file = UltraBufferedStream(
+                        user_client, 
+                        media_obj,
+                        fresh_msg.file.size,
+                        file_name,
+                        start_time
+                    )
+                    
+                    await bot_client.send_file(
+                        dest_id,
+                        file=stream_file,
+                        caption=fresh_msg.text or "",
+                        attributes=attributes, # New attributes with .mp4 name
+                        thumb=thumb,
+                        supports_streaming=True, # Critical for MP4
+                        file_size=fresh_msg.file.size,
+                        force_document=not is_video_mode, # False if Video (makes it streamable), True if File
+                        part_size_kb=8192 
+                    )
+                    
+                    if thumb and os.path.exists(thumb): os.remove(thumb)
+                    success = True
+                    await status_message.edit(f"✅ **Sent:** `{file_name}`")
 
                 except (errors.FileReferenceExpiredError, errors.MediaEmptyError):
                     logger.warning(f"Ref Expired on {message.id}, refreshing...")
@@ -273,7 +314,7 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                     await asyncio.sleep(2)
 
             if not success:
-                try: await bot_client.send_message(event.chat_id, f"❌ **Skipped:** `{message.id}` after 3 attempts.")
+                try: await bot_client.send_message(event.chat_id, f"❌ **FAILED:** `{message.id}` - Could not process after 3 attempts.")
                 except: pass
             
             total_processed += 1
@@ -289,7 +330,7 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
 # --- COMMANDS ---
 @bot_client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    await event.respond("🟢 **Ultra Bot Ready (IPv4)!**\n`/clone Source Dest`")
+    await event.respond("🟢 **Ultra Bot (MP4 Enforcer) Ready!**\n`/clone Source Dest`")
 
 @bot_client.on(events.NewMessage(pattern='/clone'))
 async def clone_init(event):
@@ -329,4 +370,4 @@ if __name__ == '__main__':
     bot_client.start(bot_token=BOT_TOKEN)
     logger.info("Bot is Running...")
     bot_client.run_until_disconnected()
-    
+                    
